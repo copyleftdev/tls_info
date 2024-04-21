@@ -11,69 +11,83 @@ import (
 )
 
 func main() {
-	// Define a flag for the file path
-	file := flag.String("file", "", "file path")
+	host, filePath := parseFlags()
 
-	// Parse the command-line flags
-	flag.Parse()
-
-	// Check if the file flag was provided
-	if *file == "" {
-		fmt.Println("Error: file path not provided")
+	// Error handling for both flags missing
+	if host == "" && filePath == "" {
+		fmt.Println("Error: neither a single host nor a file path was provided")
 		return
 	}
 
-	// Open the file
-	f, err := os.Open(*file)
+	var wg sync.WaitGroup
+
+	// Check single host first
+	if host != "" {
+		wg.Add(1)
+		go checkTLS(host, &wg)
+	}
+
+	// Process file if it's provided
+	if filePath != "" {
+		if err := processFile(filePath, &wg); err != nil {
+			fmt.Println("Error:", err)
+		}
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+}
+
+func parseFlags() (string, string) {
+	host := flag.String("host", "", "single host to check")
+	file := flag.String("file", "", "file path to be processed")
+	flag.Parse()
+	return *host, *file
+}
+
+func processFile(filePath string, wg *sync.WaitGroup) error {
+	f, err := os.Open(filePath)
 	if err != nil {
-		// Handle the error
-		return
+		return err
 	}
 	defer f.Close()
 
-	// Use a wait group to wait for all Go routines to finish
-	var wg sync.WaitGroup
-
-	// Create a scanner to read the file line by line
 	scanner := bufio.NewScanner(f)
 
-	// Read the file line by line
 	for scanner.Scan() {
-		// Split the line by tabs
-		fields := strings.Split(scanner.Text(), "\t")
-
-		// Check if there are enough fields
-		if len(fields) < 1 {
-			continue
-		}
-
-		// Get the server address from the first field
-		server := fields[0]
-
-		// Start a new Go routine to check the TLS version and cipher of the server
+		line := scanner.Text()
 		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			// Create a TLS connection to the server
-			conn, err := tls.Dial("tcp", server, &tls.Config{
-				InsecureSkipVerify: true,
-			})
-			if err != nil {
-				// Handle the error
-				return
-			}
-			defer conn.Close()
-
-			// Get the TLS version and cipher used by the connection
-			tlsVersion := conn.ConnectionState().Version
-			tlsCipher := tls.CipherSuiteName(conn.ConnectionState().CipherSuite)
-
-			// Print the TLS version and cipher
-			fmt.Printf("%s\nTLS version: %d\nTLS cipher: %s\n", server, tlsVersion, tlsCipher)
-		}()
+		go checkTLS(line, wg)
 	}
 
-	// Wait for all Go routines to finish
-	wg.Wait()
+	return scanner.Err()
+}
+
+func checkTLS(server string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	server = strings.TrimSpace(server) // Clean up server name from potential extra spaces
+	if server == "" {
+		return // Skip empty lines or spaces
+	}
+
+	tlsVersion, tlsCipher, err := getTLSInfo(server)
+	if err != nil {
+		fmt.Println("Error connecting to server:", server, err)
+		return
+	}
+
+	fmt.Printf("%s\nTLS version: %x\nTLS cipher: %s\n", server, tlsVersion, tlsCipher)
+}
+
+func getTLSInfo(server string) (uint16, string, error) {
+	conn, err := tls.Dial("tcp", server, &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		return 0, "", err
+	}
+	defer conn.Close()
+
+	tlsVersion := conn.ConnectionState().Version
+	tlsCipher := tls.CipherSuiteName(conn.ConnectionState().CipherSuite)
+	return tlsVersion, tlsCipher, nil
 }
